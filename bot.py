@@ -1,6 +1,5 @@
 import os
 import sqlite3
-import html
 import logging
 from datetime import datetime
 
@@ -8,18 +7,20 @@ from dotenv import load_dotenv
 
 from telegram import (
     Update,
-    InlineKeyboardButton,
+    ReplyKeyboardMarkup,
+    KeyboardButton,
     InlineKeyboardMarkup,
+    InlineKeyboardButton,
 )
-from telegram.constants import ParseMode
 from telegram.ext import (
     Application,
     CommandHandler,
-    CallbackQueryHandler,
     MessageHandler,
+    CallbackQueryHandler,
     ContextTypes,
     filters,
 )
+
 
 # =========================================================
 # SOZLAMALAR
@@ -27,15 +28,25 @@ from telegram.ext import (
 
 load_dotenv()
 
-BOT_TOKEN = os.getenv("BOT_TOKEN", "").strip()
+BOT_TOKEN = os.getenv("BOT_TOKEN")
 
-ADMIN_IDS = {
-    int(x.strip())
-    for x in os.getenv("ADMIN_IDS", "").split(",")
-    if x.strip().isdigit()
-}
+ADMIN_IDS = [
+    7267416938,
+    1058849364,
+]
 
 DB_NAME = "rektor_bot.db"
+
+
+if not BOT_TOKEN:
+    raise ValueError(
+        "BOT_TOKEN .env faylda topilmadi!"
+    )
+
+
+# =========================================================
+# LOGGING
+# =========================================================
 
 logging.basicConfig(
     format="%(asctime)s | %(levelname)s | %(name)s | %(message)s",
@@ -46,16 +57,8 @@ logger = logging.getLogger(__name__)
 
 
 # =========================================================
-# YORDAMCHI FUNKSIYALAR
+# DATABASE
 # =========================================================
-
-def now():
-    return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-
-
-def esc(text):
-    return html.escape(str(text))
-
 
 def get_db():
     conn = sqlite3.connect(DB_NAME)
@@ -63,856 +66,828 @@ def get_db():
     return conn
 
 
-def is_admin(user_id):
-    return user_id in ADMIN_IDS
+def now():
+    return datetime.now().strftime(
+        "%Y-%m-%d %H:%M:%S"
+    )
 
-
-# =========================================================
-# DATABASE
-# =========================================================
 
 def init_db():
     conn = get_db()
-    cur = conn.cursor()
+    cursor = conn.cursor()
 
-    cur.execute("""
+    # USERS
+    cursor.execute("""
         CREATE TABLE IF NOT EXISTS users (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            telegram_id INTEGER UNIQUE NOT NULL,
+            telegram_id INTEGER PRIMARY KEY,
             full_name TEXT NOT NULL,
             course TEXT NOT NULL,
             faculty TEXT NOT NULL,
             group_name TEXT NOT NULL,
+            phone TEXT,
             created_at TEXT NOT NULL,
             updated_at TEXT NOT NULL
         )
     """)
 
-    cur.execute("""
+    # APPEALS
+    cursor.execute("""
         CREATE TABLE IF NOT EXISTS appeals (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             telegram_id INTEGER NOT NULL,
-            category TEXT DEFAULT 'Rektorga murojaat',
-            message TEXT NOT NULL,
-            status TEXT DEFAULT 'new',
+            appeal_text TEXT NOT NULL,
+            status TEXT NOT NULL DEFAULT 'Yangi',
+            admin_reply TEXT,
+            media_type TEXT,
+            media_file_id TEXT,
             created_at TEXT NOT NULL,
             updated_at TEXT NOT NULL
         )
     """)
 
-    cur.execute("""
-        CREATE TABLE IF NOT EXISTS replies (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            appeal_id INTEGER NOT NULL,
-            admin_id INTEGER NOT NULL,
-            message TEXT NOT NULL,
-            created_at TEXT NOT NULL
+    # USERS jadvali ustunlarini tekshirish
+    cursor.execute("PRAGMA table_info(users)")
+    user_columns = [
+        row["name"]
+        for row in cursor.fetchall()
+    ]
+
+    if "phone" not in user_columns:
+        cursor.execute(
+            "ALTER TABLE users ADD COLUMN phone TEXT"
         )
-    """)
+
+    if "created_at" not in user_columns:
+        cursor.execute(
+            "ALTER TABLE users ADD COLUMN created_at TEXT"
+        )
+
+    if "updated_at" not in user_columns:
+        cursor.execute(
+            "ALTER TABLE users ADD COLUMN updated_at TEXT"
+        )
+
+    # APPEALS jadvali ustunlarini tekshirish
+    cursor.execute("PRAGMA table_info(appeals)")
+    appeal_columns = [
+        row["name"]
+        for row in cursor.fetchall()
+    ]
+
+    if "appeal_text" not in appeal_columns:
+        cursor.execute(
+            "ALTER TABLE appeals ADD COLUMN appeal_text TEXT"
+        )
+
+    if "status" not in appeal_columns:
+        cursor.execute(
+            "ALTER TABLE appeals ADD COLUMN status TEXT DEFAULT 'Yangi'"
+        )
+
+    if "admin_reply" not in appeal_columns:
+        cursor.execute(
+            "ALTER TABLE appeals ADD COLUMN admin_reply TEXT"
+        )
+
+    if "media_type" not in appeal_columns:
+        cursor.execute(
+            "ALTER TABLE appeals ADD COLUMN media_type TEXT"
+        )
+
+    if "media_file_id" not in appeal_columns:
+        cursor.execute(
+            "ALTER TABLE appeals ADD COLUMN media_file_id TEXT"
+        )
+
+    if "created_at" not in appeal_columns:
+        cursor.execute(
+            "ALTER TABLE appeals ADD COLUMN created_at TEXT"
+        )
+
+    if "updated_at" not in appeal_columns:
+        cursor.execute(
+            "ALTER TABLE appeals ADD COLUMN updated_at TEXT"
+        )
 
     conn.commit()
     conn.close()
 
 
-def get_user(telegram_id):
-    conn = get_db()
+# =========================================================
+# YORDAMCHI FUNKSIYALAR
+# =========================================================
 
-    user = conn.execute(
+def is_admin(user_id: int) -> bool:
+    return user_id in ADMIN_IDS
+
+
+def get_user(telegram_id: int):
+    conn = get_db()
+    cursor = conn.cursor()
+
+    cursor.execute(
         """
         SELECT *
         FROM users
         WHERE telegram_id = ?
         """,
-        (telegram_id,)
-    ).fetchone()
+        (telegram_id,),
+    )
+
+    user = cursor.fetchone()
 
     conn.close()
+
     return user
 
 
-def save_user(
-    telegram_id,
-    full_name,
-    course,
-    faculty,
-    group_name
-):
+def get_appeal(appeal_id: int):
     conn = get_db()
+    cursor = conn.cursor()
 
-    current_time = now()
-
-    existing = conn.execute(
-        """
-        SELECT id
-        FROM users
-        WHERE telegram_id = ?
-        """,
-        (telegram_id,)
-    ).fetchone()
-
-    if existing:
-        conn.execute(
-            """
-            UPDATE users
-            SET
-                full_name = ?,
-                course = ?,
-                faculty = ?,
-                group_name = ?,
-                updated_at = ?
-            WHERE telegram_id = ?
-            """,
-            (
-                full_name,
-                course,
-                faculty,
-                group_name,
-                current_time,
-                telegram_id,
-            )
-        )
-    else:
-        conn.execute(
-            """
-            INSERT INTO users (
-                telegram_id,
-                full_name,
-                course,
-                faculty,
-                group_name,
-                created_at,
-                updated_at
-            )
-            VALUES (?, ?, ?, ?, ?, ?, ?)
-            """,
-            (
-                telegram_id,
-                full_name,
-                course,
-                faculty,
-                group_name,
-                current_time,
-                current_time,
-            )
-        )
-
-    conn.commit()
-    conn.close()
-
-
-def create_appeal(telegram_id, message):
-    conn = get_db()
-
-    current_time = now()
-
-    cur = conn.execute(
-        """
-        INSERT INTO appeals (
-            telegram_id,
-            category,
-            message,
-            status,
-            created_at,
-            updated_at
-        )
-        VALUES (?, ?, ?, ?, ?, ?)
-        """,
-        (
-            telegram_id,
-            "Rektorga murojaat",
-            message,
-            "new",
-            current_time,
-            current_time,
-        )
-    )
-
-    appeal_id = cur.lastrowid
-
-    conn.commit()
-    conn.close()
-
-    return appeal_id
-
-
-def get_appeal(appeal_id):
-    conn = get_db()
-
-    appeal = conn.execute(
+    cursor.execute(
         """
         SELECT *
         FROM appeals
         WHERE id = ?
         """,
-        (appeal_id,)
-    ).fetchone()
+        (appeal_id,),
+    )
+
+    appeal = cursor.fetchone()
 
     conn.close()
 
     return appeal
 
 
-def get_new_appeals():
-    conn = get_db()
-
-    appeals = conn.execute(
-        """
-        SELECT *
-        FROM appeals
-        WHERE status = 'new'
-        ORDER BY id DESC
-        """
-    ).fetchall()
-
-    conn.close()
-
-    return appeals
-
-
-def get_all_appeals():
-    conn = get_db()
-
-    appeals = conn.execute(
-        """
-        SELECT *
-        FROM appeals
-        ORDER BY id DESC
-        """
-    ).fetchall()
-
-    conn.close()
-
-    return appeals
-
-
-def update_status(appeal_id, status):
-    conn = get_db()
-
-    conn.execute(
-        """
-        UPDATE appeals
-        SET
-            status = ?,
-            updated_at = ?
-        WHERE id = ?
-        """,
-        (
-            status,
-            now(),
-            appeal_id,
-        )
-    )
-
-    conn.commit()
-    conn.close()
-
-
-def save_reply(appeal_id, admin_id, message):
-    conn = get_db()
-
-    conn.execute(
-        """
-        INSERT INTO replies (
-            appeal_id,
-            admin_id,
-            message,
-            created_at
-        )
-        VALUES (?, ?, ?, ?)
-        """,
-        (
-            appeal_id,
-            admin_id,
-            message,
-            now(),
-        )
-    )
-
-    conn.commit()
-    conn.close()
-
-
 # =========================================================
 # KEYBOARDS
 # =========================================================
 
-def start_keyboard():
-    return InlineKeyboardMarkup([
+def start_registration_keyboard():
+    return ReplyKeyboardMarkup(
         [
-            InlineKeyboardButton(
-                "🚀 Ro‘yxatdan o‘tish",
-                callback_data="register_start"
-            )
+            ["📝 Ro‘yxatdan o‘tish"],
         ],
+        resize_keyboard=True,
+    )
+
+
+def main_menu_keyboard():
+    return ReplyKeyboardMarkup(
         [
-            InlineKeyboardButton(
-                "ℹ️ Bot haqida",
-                callback_data="about_bot"
-            )
+            ["📝 Murojaat yuborish"],
+        ],
+        resize_keyboard=True,
+    )
+
+
+def course_keyboard():
+    return ReplyKeyboardMarkup(
+        [
+            ["1-kurs", "2-kurs"],
+            ["3-kurs", "4-kurs"],
+        ],
+        resize_keyboard=True,
+        one_time_keyboard=True,
+    )
+
+
+def faculty_keyboard():
+    return ReplyKeyboardMarkup(
+        [
+            ["Aniq fanlar fakulteti"],
+            ["Iqtisodiyot fakulteti"],
+            ["Maktabgacha va boshlang‘ich ta’lim fakulteti"],
+            ["San’at va sport fakulteti"],
+            ["Tabiiy fanlar va tibbiyot fakulteti"],
+            ["Tarix fakulteti"],
+            ["Tillar fakulteti"],
+        ],
+        resize_keyboard=True,
+        one_time_keyboard=True,
+    )
+
+
+def phone_keyboard():
+    return ReplyKeyboardMarkup(
+        [
+            [
+                KeyboardButton(
+                    "📱 Telefon raqamimni yuborish",
+                    request_contact=True,
+                )
+            ]
+        ],
+        resize_keyboard=True,
+        one_time_keyboard=True,
+    )
+
+
+def media_keyboard():
+    return ReplyKeyboardMarkup(
+        [
+            ["✅ Ha, ilova qilaman"],
+            ["❌ Yo‘q, ilova qilmayman"],
+        ],
+        resize_keyboard=True,
+        one_time_keyboard=True,
+    )
+
+
+def cancel_keyboard():
+    return ReplyKeyboardMarkup(
+        [
+            ["❌ Bekor qilish"],
+        ],
+        resize_keyboard=True,
+    )
+
+
+def admin_appeal_keyboard(appeal_id: int):
+    return InlineKeyboardMarkup(
+        [
+            [
+                InlineKeyboardButton(
+                    "💬 Javob berish",
+                    callback_data=f"reply:{appeal_id}",
+                )
+            ]
         ]
-    ])
-
-
-def main_menu():
-    return InlineKeyboardMarkup([
-        [
-            InlineKeyboardButton(
-                "📝 Rektorga murojaat",
-                callback_data="appeal_start"
-            )
-        ],
-        [
-            InlineKeyboardButton(
-                "👤 Mening ma’lumotlarim",
-                callback_data="my_profile"
-            )
-        ],
-        [
-            InlineKeyboardButton(
-                "ℹ️ Bot haqida",
-                callback_data="about_bot"
-            )
-        ]
-    ])
-
-
-def confirm_registration():
-    return InlineKeyboardMarkup([
-        [
-            InlineKeyboardButton(
-                "✅ Tasdiqlash",
-                callback_data="register_confirm"
-            )
-        ],
-        [
-            InlineKeyboardButton(
-                "✏️ Qayta kiritish",
-                callback_data="register_rewrite"
-            )
-        ]
-    ])
-
-
-def appeal_confirm():
-    return InlineKeyboardMarkup([
-        [
-            InlineKeyboardButton(
-                "📨 Yuborish",
-                callback_data="appeal_confirm"
-            )
-        ],
-        [
-            InlineKeyboardButton(
-                "✏️ Qayta yozish",
-                callback_data="appeal_rewrite"
-            )
-        ]
-    ])
-
-
-def admin_menu():
-    return InlineKeyboardMarkup([
-        [
-            InlineKeyboardButton(
-                "🆕 Yangi murojaatlar",
-                callback_data="admin_new"
-            )
-        ],
-        [
-            InlineKeyboardButton(
-                "📋 Barcha murojaatlar",
-                callback_data="admin_all"
-            )
-        ],
-        [
-            InlineKeyboardButton(
-                "📊 Statistika",
-                callback_data="admin_stats"
-            )
-        ]
-    ])
-
-
-def appeal_actions(appeal_id):
-    return InlineKeyboardMarkup([
-        [
-            InlineKeyboardButton(
-                "💬 Javob berish",
-                callback_data=f"reply_{appeal_id}"
-            )
-        ],
-        [
-            InlineKeyboardButton(
-                "🔄 Jarayonda",
-                callback_data=f"status_process_{appeal_id}"
-            ),
-            InlineKeyboardButton(
-                "✅ Yakunlandi",
-                callback_data=f"status_done_{appeal_id}"
-            )
-        ],
-        [
-            InlineKeyboardButton(
-                "❌ Rad etildi",
-                callback_data=f"status_rejected_{appeal_id}"
-            )
-        ]
-    ])
-
-
-def back_to_menu():
-    return InlineKeyboardMarkup([
-        [
-            InlineKeyboardButton(
-                "⬅️ Asosiy menyu",
-                callback_data="back_main"
-            )
-        ]
-    ])
+    )
 
 
 # =========================================================
-# /START
+# START
 # =========================================================
 
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def start(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+):
+
+    user = update.effective_user
+    user_id = user.id
 
     context.user_data.clear()
 
-    user = get_user(update.effective_user.id)
+    # =====================================================
+    # ADMIN
+    # =====================================================
 
-    if not user:
-
-        text = (
-            "🎓 <b>UNIVERSITET REKTORIGA MUROJAAT BOTI</b>\n\n"
-            "Assalomu alaykum! 👋\n\n"
-            "Ushbu bot orqali talabalar "
-            "<b>rektoratga o‘z murojaatlarini</b> "
-            "qulay va tezkor tarzda yuborishlari mumkin.\n\n"
-            "📌 Murojaat yuborishdan oldin "
-            "qisqa ro‘yxatdan o‘tishingiz kerak.\n\n"
-            "🔐 Sizning ma’lumotlaringiz murojaatni "
-            "to‘g‘ri ko‘rib chiqish uchun foydalaniladi."
-        )
+    if is_admin(user_id):
 
         await update.message.reply_text(
-            text,
-            parse_mode=ParseMode.HTML,
-            reply_markup=start_keyboard()
-        )
-
-    else:
-
-        text = (
-            "🎓 <b>Xush kelibsiz!</b>\n\n"
-            f"👤 <b>{esc(user['full_name'])}</b>\n\n"
-            "Rektoratga murojaat yuborish uchun "
-            "quyidagi tugmadan foydalaning."
-        )
-
-        await update.message.reply_text(
-            text,
-            parse_mode=ParseMode.HTML,
-            reply_markup=main_menu()
-        )
-
-
-# =========================================================
-# ABOUT
-# =========================================================
-
-async def about_bot(update, context):
-
-    query = update.callback_query
-    await query.answer()
-
-    text = (
-        "ℹ️ <b>BOT HAQIDA</b>\n\n"
-        "🎓 Ushbu bot universitet talabalari "
-        "va rektorat o‘rtasidagi murojaatlar "
-        "almashinuvini qulaylashtirish uchun yaratilgan.\n\n"
-        "📨 Siz murojaat yuborishingiz mumkin.\n"
-        "💬 Rektorat javobini Telegram orqali olasiz.\n"
-        "🔄 Murojaat holatini kuzatishingiz mumkin.\n\n"
-        "<i>Har bir murojaat mas’ul xodimlar tomonidan "
-        "ko‘rib chiqiladi.</i>"
-    )
-
-    await query.message.edit_text(
-        text,
-        parse_mode=ParseMode.HTML,
-        reply_markup=back_to_menu()
-    )
-
-
-# =========================================================
-# REGISTRATION
-# =========================================================
-
-def parse_registration(text):
-
-    lines = [
-        line.strip()
-        for line in text.splitlines()
-        if line.strip()
-    ]
-
-    data = {}
-
-    for line in lines:
-
-        if ":" not in line:
-            continue
-
-        key, value = line.split(":", 1)
-
-        key = key.strip().lower()
-        value = value.strip()
-
-        if not value:
-            continue
-
-        if key in [
-            "f.i.sh",
-            "f.i.sh.",
-            "fish",
-            "ism familiya"
-        ]:
-            data["full_name"] = value
-
-        elif key in [
-            "kurs",
-            "course"
-        ]:
-            data["course"] = value
-
-        elif key in [
-            "fakultet",
-            "faculty"
-        ]:
-            data["faculty"] = value
-
-        elif key in [
-            "guruh",
-            "group"
-        ]:
-            data["group_name"] = value
-
-    if len(data) < 4 and len(lines) == 4:
-
-        data = {
-            "full_name": lines[0],
-            "course": lines[1],
-            "faculty": lines[2],
-            "group_name": lines[3],
-        }
-
-    required = [
-        "full_name",
-        "course",
-        "faculty",
-        "group_name",
-    ]
-
-    if not all(key in data for key in required):
-        return None
-
-    return data
-
-
-async def registration_start(update, context):
-
-    query = update.callback_query
-    await query.answer()
-
-    context.user_data.clear()
-    context.user_data["state"] = "registration"
-
-    text = (
-        "📝 <b>RO‘YXATDAN O‘TISH</b>\n\n"
-        "Sizdan faqat <b>4 ta ma’lumot</b> kerak.\n\n"
-        "Hammasini <b>bitta xabarda</b> yuboring:\n\n"
-        "<code>"
-        "F.I.Sh: Aliyev Ali Valiyevich\n"
-        "Kurs: 2\n"
-        "Fakultet: Axborot texnologiyalari\n"
-        "Guruh: KX-24-01"
-        "</code>\n\n"
-        "💡 Guruhni oddiy yozishingiz mumkin:\n"
-        "<b>KX-24-01</b>, <b>24-01</b>, <b>101</b>, <b>12-A</b>"
-    )
-
-    await query.message.edit_text(
-        text,
-        parse_mode=ParseMode.HTML
-    )
-
-
-async def process_registration(update, context):
-
-    text = update.message.text.strip()
-
-    data = parse_registration(text)
-
-    if not data:
-
-        await update.message.reply_text(
-            "⚠️ <b>Ma’lumotlar to‘liq aniqlanmadi.</b>\n\n"
-            "Iltimos, 4 ta ma’lumotni bitta xabarda "
-            "quyidagi ko‘rinishda yuboring:\n\n"
-            "<code>"
-            "F.I.Sh: Aliyev Ali Valiyevich\n"
-            "Kurs: 2\n"
-            "Fakultet: Axborot texnologiyalari\n"
-            "Guruh: KX-24-01"
-            "</code>",
-            parse_mode=ParseMode.HTML
+            "✅ NAVOIY DAVLAT UNIVERSITETI\n"
+            "REKTORGA MUROJAAT BOTI\n\n"
+            "Siz admin sifatida tizimga kirdingiz.\n\n"
+            "📩 Yangi murojaatlar shu chatga keladi.\n"
+            "💬 Murojaatga javob berish uchun "
+            "«Javob berish» tugmasidan foydalaning."
         )
 
         return
 
-    context.user_data["registration_data"] = data
-    context.user_data["state"] = "registration_confirm"
+    # =====================================================
+    # FOYDALANUVCHI
+    # =====================================================
 
-    text = (
-        "🔎 <b>MA’LUMOTLARNI TEKSHIRING</b>\n\n"
-        "👤 <b>F.I.Sh</b>\n"
-        f"{esc(data['full_name'])}\n\n"
-        "🎓 <b>Kurs</b>\n"
-        f"{esc(data['course'])}\n\n"
-        "🏛 <b>Fakultet</b>\n"
-        f"{esc(data['faculty'])}\n\n"
-        "👥 <b>Guruh</b>\n"
-        f"{esc(data['group_name'])}\n\n"
-        "━━━━━━━━━━━━━━\n"
-        "Ma’lumotlaringiz to‘g‘rimi?"
-    )
+    existing_user = get_user(user_id)
+
+    if existing_user:
+
+        await update.message.reply_text(
+            "Assalomu alaykum! 👋\n\n"
+            "Ushbu bot orqali Navoiy davlat universiteti "
+            "rektoriga savol, murojaat, muammo, taklif va "
+            "tashabbuslaringizni bevosita yuborishingiz mumkin.\n\n"
+            "📌 Murojaat yuborish uchun quyidagi tugmani bosing.",
+            reply_markup=main_menu_keyboard(),
+        )
+
+        return
 
     await update.message.reply_text(
-        text,
-        parse_mode=ParseMode.HTML,
-        reply_markup=confirm_registration()
+        "Assalomu alaykum! 👋\n\n"
+        "Ushbu bot orqali Navoiy davlat universiteti rektoriga "
+        "*savol, murojaat, muammo, taklif va tashabbuslaringizni* "
+        "bevosita yuborishingiz mumkin.\n\n"
+        "📌 Murojaat yuborish uchun qisqa ro‘yxatdan o‘ting.\n\n"
+        "Taqdim etilgan ma’lumotlardan murojaatingizni ko‘rib "
+        "chiqish va zarur hollarda Siz bilan bog‘lanish "
+        "maqsadida foydalaniladi.",
+        parse_mode="Markdown",
+        reply_markup=start_registration_keyboard(),
     )
 
 
-async def registration_confirm(update, context):
+# =========================================================
+# REGISTRATION START
+# =========================================================
 
-    query = update.callback_query
-    await query.answer()
-
-    data = context.user_data.get("registration_data")
-
-    if not data:
-
-        await query.message.edit_text(
-            "⚠️ Ma’lumotlar topilmadi.\n\n"
-            "Iltimos, ro‘yxatdan o‘tishni qaytadan boshlang.",
-            reply_markup=start_keyboard()
-        )
-
-        return
-
-    save_user(
-        update.effective_user.id,
-        data["full_name"],
-        data["course"],
-        data["faculty"],
-        data["group_name"]
-    )
+async def start_registration(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+):
 
     context.user_data.clear()
 
-    text = (
-        "✅ <b>RO‘YXATDAN O‘TISH YAKUNLANDI!</b>\n\n"
-        "Ma’lumotlaringiz muvaffaqiyatli saqlandi.\n\n"
-        "Endi siz rektoratga murojaat yuborishingiz mumkin. 📨"
-    )
+    context.user_data["registration"] = True
+    context.user_data["registration_step"] = "full_name"
 
-    await query.message.edit_text(
-        text,
-        parse_mode=ParseMode.HTML,
-        reply_markup=main_menu()
-    )
-
-
-async def registration_rewrite(update, context):
-
-    query = update.callback_query
-    await query.answer()
-
-    context.user_data.clear()
-    context.user_data["state"] = "registration"
-
-    await query.message.edit_text(
-        "✏️ <b>MA’LUMOTLARNI QAYTA KIRITING</b>\n\n"
-        "<code>"
-        "F.I.Sh: Aliyev Ali Valiyevich\n"
-        "Kurs: 2\n"
-        "Fakultet: Axborot texnologiyalari\n"
-        "Guruh: KX-24-01"
-        "</code>",
-        parse_mode=ParseMode.HTML
-    )
-
-
-# =========================================================
-# PROFILE
-# =========================================================
-
-async def my_profile(update, context):
-
-    query = update.callback_query
-    await query.answer()
-
-    user = get_user(update.effective_user.id)
-
-    if not user:
-
-        await query.message.edit_text(
-            "⚠️ Siz hali ro‘yxatdan o‘tmagansiz.",
-            reply_markup=start_keyboard()
-        )
-
-        return
-
-    text = (
-        "👤 <b>MENING MA’LUMOTLARIM</b>\n\n"
-        "━━━━━━━━━━━━━━\n"
-        f"👤 <b>F.I.Sh:</b>\n{esc(user['full_name'])}\n\n"
-        f"🎓 <b>Kurs:</b> {esc(user['course'])}\n"
-        f"🏛 <b>Fakultet:</b> {esc(user['faculty'])}\n"
-        f"👥 <b>Guruh:</b> {esc(user['group_name'])}\n"
-        "━━━━━━━━━━━━━━"
-    )
-
-    await query.message.edit_text(
-        text,
-        parse_mode=ParseMode.HTML,
-        reply_markup=back_to_menu()
-    )
-
-
-# =========================================================
-# APPEAL
-# =========================================================
-
-async def appeal_start(update, context):
-
-    query = update.callback_query
-    await query.answer()
-
-    user = get_user(update.effective_user.id)
-
-    if not user:
-
-        await query.message.edit_text(
-            "⚠️ Avval ro‘yxatdan o‘ting.",
-            reply_markup=start_keyboard()
-        )
-
-        return
-
-    context.user_data.clear()
-    context.user_data["state"] = "appeal"
-
-    text = (
-        "📝 <b>REKTORGA MUROJAAT</b>\n\n"
-        "Murojaatingizni imkon qadar "
-        "<b>aniq va tushunarli</b> qilib yozing.\n\n"
+    await update.message.reply_text(
+        "📝 *RO‘YXATDAN O‘TISH*\n\n"
+        "Iltimos, F.I.Sh.ingizni to‘liq kiriting.\n\n"
         "Masalan:\n"
-        "<i>“Kontrakt to‘lovi bo‘yicha savolim bor. "
-        "To‘lovni bo‘lib amalga oshirish imkoniyati haqida "
-        "ma’lumot bermoqchiman.”</i>\n\n"
-        "📌 Murojaatni bitta xabarda yuboring."
-    )
-
-    await query.message.edit_text(
-        text,
-        parse_mode=ParseMode.HTML
+        "`Aliyev Ali Valiyevich`",
+        parse_mode="Markdown",
+        reply_markup=cancel_keyboard(),
     )
 
 
-async def process_appeal(update, context):
+# =========================================================
+# REGISTRATION TEXT
+# =========================================================
+
+async def registration_text_handler(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+):
 
     text = update.message.text.strip()
+
+    if text == "❌ Bekor qilish":
+
+        context.user_data.clear()
+
+        await update.message.reply_text(
+            "❌ Ro‘yxatdan o‘tish bekor qilindi.",
+            reply_markup=start_registration_keyboard(),
+        )
+
+        return
+
+    step = context.user_data.get(
+        "registration_step"
+    )
+
+    # F.I.SH.
+    if step == "full_name":
+
+        if len(text) < 3:
+
+            await update.message.reply_text(
+                "❗️ Iltimos, F.I.Sh.ingizni to‘liq kiriting."
+            )
+
+            return
+
+        context.user_data["full_name"] = text
+        context.user_data["registration_step"] = "course"
+
+        await update.message.reply_text(
+            "🎓 *Iltimos, kursingizni tanlang:*",
+            parse_mode="Markdown",
+            reply_markup=course_keyboard(),
+        )
+
+        return
+
+    # KURS
+    if step == "course":
+
+        courses = [
+            "1-kurs",
+            "2-kurs",
+            "3-kurs",
+            "4-kurs",
+        ]
+
+        if text not in courses:
+
+            await update.message.reply_text(
+                "❗️ Iltimos, kursingizni tugma orqali tanlang.",
+                reply_markup=course_keyboard(),
+            )
+
+            return
+
+        context.user_data["course"] = text
+        context.user_data["registration_step"] = "faculty"
+
+        await update.message.reply_text(
+            "🏛 *Iltimos, fakultetingizni tanlang:*",
+            parse_mode="Markdown",
+            reply_markup=faculty_keyboard(),
+        )
+
+        return
+
+    # FAKULTET
+    if step == "faculty":
+
+        faculties = [
+            "Aniq fanlar fakulteti",
+            "Iqtisodiyot fakulteti",
+            "Maktabgacha va boshlang‘ich ta’lim fakulteti",
+            "San’at va sport fakulteti",
+            "Tabiiy fanlar va tibbiyot fakulteti",
+            "Tarix fakulteti",
+            "Tillar fakulteti",
+        ]
+
+        if text not in faculties:
+
+            await update.message.reply_text(
+                "❗️ Iltimos, fakultetingizni tugma orqali tanlang.",
+                reply_markup=faculty_keyboard(),
+            )
+
+            return
+
+        context.user_data["faculty"] = text
+        context.user_data["registration_step"] = "group"
+
+        await update.message.reply_text(
+            "👥 *Iltimos, guruhingizni kiriting.*\n\n"
+            "Masalan: `KX-24-01`",
+            parse_mode="Markdown",
+            reply_markup=cancel_keyboard(),
+        )
+
+        return
+
+    # GURUH
+    if step == "group":
+
+        if len(text) < 2:
+
+            await update.message.reply_text(
+                "❗️ Iltimos, guruhingizni to‘g‘ri kiriting."
+            )
+
+            return
+
+        context.user_data["group_name"] = text
+        context.user_data["registration_step"] = "phone"
+
+        await update.message.reply_text(
+            "📱 *Telefon raqamingizni yuboring.*\n\n"
+            "Quyidagi tugmani bosib, telefon raqamingizni "
+            "yuborishingiz mumkin:",
+            parse_mode="Markdown",
+            reply_markup=phone_keyboard(),
+        )
+
+        return
+
+
+# =========================================================
+# CONTACT
+# =========================================================
+
+async def contact_handler(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+):
+
+    if not context.user_data.get("registration"):
+        return
+
+    contact = update.message.contact
+
+    if not contact:
+        return
+
+    if contact.user_id != update.effective_user.id:
+
+        await update.message.reply_text(
+            "❗️ Iltimos, o‘zingizning telefon raqamingizni yuboring."
+        )
+
+        return
+
+    full_name = context.user_data.get("full_name")
+    course = context.user_data.get("course")
+    faculty = context.user_data.get("faculty")
+    group_name = context.user_data.get("group_name")
+
+    phone = contact.phone_number
+
+    if not all(
+        [
+            full_name,
+            course,
+            faculty,
+            group_name,
+        ]
+    ):
+
+        context.user_data.clear()
+
+        await update.message.reply_text(
+            "❗️ Ma’lumotlarda xatolik yuz berdi.\n\n"
+            "Iltimos, /start orqali qaytadan boshlang.",
+            reply_markup=start_registration_keyboard(),
+        )
+
+        return
+
+    conn = get_db()
+    cursor = conn.cursor()
+
+    cursor.execute(
+        """
+        INSERT OR REPLACE INTO users (
+            telegram_id,
+            full_name,
+            course,
+            faculty,
+            group_name,
+            phone,
+            created_at,
+            updated_at
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            update.effective_user.id,
+            full_name,
+            course,
+            faculty,
+            group_name,
+            phone,
+            now(),
+            now(),
+        ),
+    )
+
+    conn.commit()
+    conn.close()
+
+    context.user_data.clear()
+
+    await update.message.reply_text(
+        "✅ *RO‘YXATDAN O‘TISH MUVAFFAQIYATLI YAKUNLANDI!*\n\n"
+        f"👤 F.I.Sh.: {full_name}\n"
+        f"🎓 Kurs: {course}\n"
+        f"🏛 Fakultet: {faculty}\n"
+        f"👥 Guruh: {group_name}\n"
+        f"📱 Telefon: {phone}\n\n"
+        "Endi Siz rektorga murojaat yuborishingiz mumkin.",
+        parse_mode="Markdown",
+        reply_markup=main_menu_keyboard(),
+    )
+
+
+# =========================================================
+# APPEAL START
+# =========================================================
+
+async def start_appeal(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+):
+
+    user = get_user(update.effective_user.id)
+
+    if not user:
+
+        await update.message.reply_text(
+            "❗️ Murojaat yuborishdan avval, "
+            "iltimos, ro‘yxatdan o‘ting.",
+            reply_markup=start_registration_keyboard(),
+        )
+
+        return
+
+    context.user_data.clear()
+
+    context.user_data["appeal"] = True
+    context.user_data["appeal_step"] = "text"
+
+    await update.message.reply_text(
+        "📝 *MUROJAAT YUBORISH*\n\n"
+        "Hurmatli foydalanuvchi!\n\n"
+        "Murojaatingiz mazmunini imkon qadar "
+        "*batafsil va aniq* bayon qiling.\n\n"
+        "💡 Siz o‘z murojaatingizda:\n"
+        "• muammo yoki masalani;\n"
+        "• taklif va tashabbuslaringizni;\n"
+        "• savol yoki boshqa murojaatlaringizni yozishingiz mumkin.\n\n"
+        "📎 Zarur bo‘lsa, murojaatingizga tegishli "
+        "*foto, video yoki hujjatlarni* ham ilova qilishingiz mumkin.\n\n"
+        "✍️ Iltimos, murojaatingizni quyidagi xabarda yuboring.",
+        parse_mode="Markdown",
+        reply_markup=cancel_keyboard(),
+    )
+
+
+# =========================================================
+# APPEAL TEXT
+# =========================================================
+
+async def appeal_text_handler(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+):
+
+    text = update.message.text.strip()
+
+    if text == "❌ Bekor qilish":
+
+        context.user_data.clear()
+
+        await update.message.reply_text(
+            "❌ Murojaat yuborish bekor qilindi.",
+            reply_markup=main_menu_keyboard(),
+        )
+
+        return
+
+    if context.user_data.get("appeal_step") != "text":
+        return
 
     if len(text) < 5:
 
         await update.message.reply_text(
-            "⚠️ <b>Murojaat juda qisqa.</b>\n\n"
-            "Iltimos, muammo yoki savolingizni "
-            "batafsilroq yozing.",
-            parse_mode=ParseMode.HTML
+            "❗️ Iltimos, murojaatingizni batafsilroq yozing."
         )
 
         return
 
     context.user_data["appeal_text"] = text
-    context.user_data["state"] = "appeal_confirm"
-
-    preview = (
-        "🔎 <b>MUROJAATNI TEKSHIRISH</b>\n\n"
-        "━━━━━━━━━━━━━━\n"
-        f"{esc(text)}\n"
-        "━━━━━━━━━━━━━━\n\n"
-        "Murojaat yuborilsinmi?"
-    )
+    context.user_data["appeal_step"] = "media"
 
     await update.message.reply_text(
-        preview,
-        parse_mode=ParseMode.HTML,
-        reply_markup=appeal_confirm()
+        "📎 *Murojaatingizga foto, video yoki hujjat "
+        "ilova qilasizmi?*",
+        parse_mode="Markdown",
+        reply_markup=media_keyboard(),
     )
 
 
-async def appeal_send(update, context):
+# =========================================================
+# MEDIA QUESTION
+# =========================================================
 
-    query = update.callback_query
-    await query.answer()
+async def media_question_handler(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+):
 
-    text = context.user_data.get("appeal_text")
+    text = update.message.text.strip()
 
-    if not text:
+    if text == "❌ Bekor qilish":
 
-        await query.message.edit_text(
-            "⚠️ Murojaat topilmadi.\n\n"
-            "Iltimos, qaytadan urinib ko‘ring.",
-            reply_markup=main_menu()
+        context.user_data.clear()
+
+        await update.message.reply_text(
+            "❌ Murojaat yuborish bekor qilindi.",
+            reply_markup=main_menu_keyboard(),
         )
 
         return
 
-    user = get_user(update.effective_user.id)
+    if context.user_data.get("appeal_step") != "media":
+        return
+
+    # MEDIA YO‘Q
+    if text == "❌ Yo‘q, ilova qilmayman":
+
+        await create_and_send_appeal(
+            update,
+            context,
+            media_type=None,
+            media_file_id=None,
+        )
+
+        return
+
+    # MEDIA BOR
+    if text == "✅ Ha, ilova qilaman":
+
+        context.user_data["appeal_step"] = "waiting_media"
+
+        await update.message.reply_text(
+            "📎 *Iltimos, endi foto, video yoki hujjatni yuboring.*\n\n"
+            "Kerakli faylni shu yerga yuborishingiz mumkin.",
+            parse_mode="Markdown",
+            reply_markup=cancel_keyboard(),
+        )
+
+        return
+
+    await update.message.reply_text(
+        "❗️ Iltimos, quyidagi tugmalardan birini tanlang.",
+        reply_markup=media_keyboard(),
+    )
+
+
+# =========================================================
+# CREATE AND SEND APPEAL
+# =========================================================
+
+async def create_and_send_appeal(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+    media_type=None,
+    media_file_id=None,
+):
+
+    user_id = update.effective_user.id
+
+    user = get_user(user_id)
 
     if not user:
 
-        await query.message.edit_text(
-            "⚠️ Foydalanuvchi ma’lumotlari topilmadi.",
-            reply_markup=start_keyboard()
+        context.user_data.clear()
+
+        await update.message.reply_text(
+            "❗️ Iltimos, avval ro‘yxatdan o‘ting.",
+            reply_markup=start_registration_keyboard(),
         )
 
         return
 
-    appeal_id = create_appeal(
-        update.effective_user.id,
-        text
+    appeal_text = context.user_data.get(
+        "appeal_text"
     )
+
+    if not appeal_text:
+
+        context.user_data.clear()
+
+        await update.message.reply_text(
+            "❗️ Murojaat topilmadi.\n\n"
+            "Iltimos, qaytadan urinib ko‘ring.",
+            reply_markup=main_menu_keyboard(),
+        )
+
+        return
+
+    # =====================================================
+    # DATABASE
+    # =====================================================
+
+    conn = get_db()
+    cursor = conn.cursor()
+
+    cursor.execute(
+        """
+        INSERT INTO appeals (
+            telegram_id,
+            appeal_text,
+            status,
+            admin_reply,
+            media_type,
+            media_file_id,
+            created_at,
+            updated_at
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            user_id,
+            appeal_text,
+            "Yangi",
+            None,
+            media_type,
+            media_file_id,
+            now(),
+            now(),
+        ),
+    )
+
+    appeal_id = cursor.lastrowid
+
+    conn.commit()
+    conn.close()
+
+    # =====================================================
+    # ADMIN XABARI
+    # =====================================================
 
     admin_text = (
-        "🚨 <b>YANGI REKTORGA MUROJAAT</b>\n\n"
-        "━━━━━━━━━━━━━━━━\n"
-        f"🆔 <b>Murojaat:</b> #{appeal_id}\n"
-        f"👤 <b>Talaba:</b> {esc(user['full_name'])}\n"
-        f"🎓 <b>Kurs:</b> {esc(user['course'])}\n"
-        f"🏛 <b>Fakultet:</b> {esc(user['faculty'])}\n"
-        f"👥 <b>Guruh:</b> {esc(user['group_name'])}\n"
-        "━━━━━━━━━━━━━━━━\n\n"
-        "📝 <b>Murojaat matni:</b>\n\n"
-        f"{esc(text)}\n\n"
-        f"🕐 <b>Vaqt:</b> {now()}"
+        "🔔 YANGI MUROJAAT\n\n"
+        f"🆔 Murojaat: #{appeal_id}\n\n"
+        f"👤 F.I.Sh.: {user['full_name']}\n"
+        f"📱 Telefon: {user['phone'] or 'Ko‘rsatilmagan'}\n"
+        f"🎓 Kurs: {user['course']}\n"
+        f"🏛 Fakultet: {user['faculty']}\n"
+        f"👥 Guruh: {user['group_name']}\n\n"
+        "📝 MUROJAAT:\n"
+        f"{appeal_text}\n\n"
+        "👇 Talabaga javob berish uchun "
+        "«Javob berish» tugmasini bosing."
     )
 
-    sent = 0
+    success_count = 0
+
+    # =====================================================
+    # IKKALA ADMIN
+    # =====================================================
 
     for admin_id in ADMIN_IDS:
 
@@ -921,673 +896,481 @@ async def appeal_send(update, context):
             await context.bot.send_message(
                 chat_id=admin_id,
                 text=admin_text,
-                parse_mode=ParseMode.HTML,
-                reply_markup=appeal_actions(appeal_id)
+                reply_markup=admin_appeal_keyboard(
+                    appeal_id
+                ),
             )
 
-            sent += 1
+            # FOTO
+            if (
+                media_type == "photo"
+                and media_file_id
+            ):
+
+                await context.bot.send_photo(
+                    chat_id=admin_id,
+                    photo=media_file_id,
+                    caption=(
+                        f"📎 Murojaat #{appeal_id} "
+                        "ilovasi"
+                    ),
+                )
+
+            # VIDEO
+            elif (
+                media_type == "video"
+                and media_file_id
+            ):
+
+                await context.bot.send_video(
+                    chat_id=admin_id,
+                    video=media_file_id,
+                    caption=(
+                        f"📎 Murojaat #{appeal_id} "
+                        "ilovasi"
+                    ),
+                )
+
+            # DOCUMENT
+            elif (
+                media_type == "document"
+                and media_file_id
+            ):
+
+                await context.bot.send_document(
+                    chat_id=admin_id,
+                    document=media_file_id,
+                    caption=(
+                        f"📎 Murojaat #{appeal_id} "
+                        "ilovasi"
+                    ),
+                )
+
+            success_count += 1
 
         except Exception as e:
 
             logger.error(
-                f"Admin {admin_id} ga yuborishda xato: {e}"
+                f"Admin {admin_id} ga yuborishda "
+                f"xatolik: {e}"
             )
+
+    # =====================================================
+    # FOYDALANUVCHIGA TASDIQ
+    # =====================================================
 
     context.user_data.clear()
 
-    if sent == 0:
-
-        await query.message.edit_text(
-            "⚠️ <b>Texnik xatolik yuz berdi.</b>\n\n"
-            "Murojaatingiz saqlandi, lekin "
-            "mas’ullarga yuborishda muammo yuz berdi.\n\n"
-            "Iltimos, keyinroq tekshiring.",
-            parse_mode=ParseMode.HTML,
-            reply_markup=main_menu()
-        )
-
-        return
-
-    text = (
-        "✅ <b>MUROJAATINGIZ QABUL QILINDI!</b>\n\n"
-        "Murojaatingiz rektorat mas’ullariga "
-        "muvaffaqiyatli yuborildi.\n\n"
-        f"🆔 <b>Murojaat raqami:</b> #{appeal_id}\n\n"
-        "📩 Javob yoki murojaat holatidagi "
-        "o‘zgarishlar Telegram orqali yuboriladi."
-    )
-
-    await query.message.edit_text(
-        text,
-        parse_mode=ParseMode.HTML,
-        reply_markup=main_menu()
-    )
-
-
-async def appeal_rewrite(update, context):
-
-    query = update.callback_query
-    await query.answer()
-
-    context.user_data["state"] = "appeal"
-
-    await query.message.edit_text(
-        "✏️ <b>MUROJAATNI QAYTA YOZING</b>\n\n"
-        "Murojaatingizni bitta xabarda yuboring.",
-        parse_mode=ParseMode.HTML
-    )
-
-
-# =========================================================
-# ADMIN PANEL
-# =========================================================
-
-async def admin_command(update, context):
-
-    if not is_admin(update.effective_user.id):
+    if success_count > 0:
 
         await update.message.reply_text(
-            "⛔ <b>Kirish taqiqlangan.</b>\n\n"
-            "Sizda admin huquqi mavjud emas.",
-            parse_mode=ParseMode.HTML
+            "☑️ *MUROJAATINGIZ QABUL QILINDI!*\n\n"
+            "Hurmatli talaba, murojaatingiz muvaffaqiyatli "
+            "qabul qilindi va *o‘rganib chiqish uchun tegishli "
+            "mas’ullarga yo‘naltirildi.*\n\n"
+            "🔎 Murojaatingiz belgilangan tartibda o‘rganib "
+            "chiqiladi va natijasi bo‘yicha Sizga ushbu bot "
+            "orqali ma’lumot beriladi.",
+            parse_mode="Markdown",
+            reply_markup=main_menu_keyboard(),
         )
 
+    else:
+
+        await update.message.reply_text(
+            "⚠️ Murojaatingiz saqlandi, ammo hozircha "
+            "tegishli mas’ullarga yuborishda texnik muammo "
+            "yuz berdi.\n\n"
+            "Iltimos, birozdan so‘ng qayta urinib ko‘ring.",
+            reply_markup=main_menu_keyboard(),
+        )
+
+
+# =========================================================
+# PHOTO
+# =========================================================
+
+async def photo_handler(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+):
+
+    if context.user_data.get("appeal_step") != "waiting_media":
         return
 
-    await update.message.reply_text(
-        "🔐 <b>ADMINISTRATOR PANELI</b>\n\n"
-        "Kerakli bo‘limni tanlang:",
-        parse_mode=ParseMode.HTML,
-        reply_markup=admin_menu()
+    photo = update.message.photo[-1]
+
+    await create_and_send_appeal(
+        update,
+        context,
+        media_type="photo",
+        media_file_id=photo.file_id,
     )
 
 
 # =========================================================
-# NEW APPEALS
+# VIDEO
 # =========================================================
 
-async def show_new_appeals(update, context):
+async def video_handler(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+):
+
+    if context.user_data.get("appeal_step") != "waiting_media":
+        return
+
+    video = update.message.video
+
+    await create_and_send_appeal(
+        update,
+        context,
+        media_type="video",
+        media_file_id=video.file_id,
+    )
+
+
+# =========================================================
+# DOCUMENT
+# =========================================================
+
+async def document_handler(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+):
+
+    if context.user_data.get("appeal_step") != "waiting_media":
+        return
+
+    document = update.message.document
+
+    await create_and_send_appeal(
+        update,
+        context,
+        media_type="document",
+        media_file_id=document.file_id,
+    )
+
+
+# =========================================================
+# ADMIN CALLBACK
+# =========================================================
+
+async def callback_handler(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+):
 
     query = update.callback_query
-    await query.answer()
+    user_id = query.from_user.id
 
-    if not is_admin(update.effective_user.id):
-        return
+    if not is_admin(user_id):
 
-    appeals = get_new_appeals()
-
-    if not appeals:
-
-        await query.message.edit_text(
-            "📭 <b>Yangi murojaatlar yo‘q.</b>\n\n"
-            "Hozircha ko‘rib chiqilmagan murojaatlar mavjud emas.",
-            parse_mode=ParseMode.HTML,
-            reply_markup=admin_menu()
+        await query.answer(
+            "❌ Sizda ruxsat yo‘q.",
+            show_alert=True,
         )
 
         return
 
-    await query.message.edit_text(
-        f"🆕 <b>YANGI MUROJAATLAR</b>\n\n"
-        f"Jami: <b>{len(appeals)}</b> ta",
-        parse_mode=ParseMode.HTML,
-        reply_markup=admin_menu()
-    )
+    await query.answer()
 
-    for appeal in appeals:
+    data = query.data
 
-        user = get_user(appeal["telegram_id"])
+    if data.startswith("reply:"):
 
-        if user:
+        try:
 
-            student_info = (
-                f"👤 <b>Talaba:</b> {esc(user['full_name'])}\n"
-                f"🎓 <b>Kurs:</b> {esc(user['course'])}\n"
-                f"🏛 <b>Fakultet:</b> {esc(user['faculty'])}\n"
-                f"👥 <b>Guruh:</b> {esc(user['group_name'])}\n\n"
+            appeal_id = int(
+                data.split(":")[1]
             )
 
-        else:
-            student_info = ""
+        except (
+            ValueError,
+            IndexError,
+        ):
 
-        text = (
-            "🆕 <b>MUROJAAT</b>\n\n"
-            f"🆔 <b>#{appeal['id']}</b>\n"
-            f"{student_info}"
-            "━━━━━━━━━━━━━━━━\n"
-            f"📝 {esc(appeal['message'])}\n"
-            "━━━━━━━━━━━━━━━━\n"
-            f"🕐 {appeal['created_at']}"
-        )
-
-        await query.message.reply_text(
-            text,
-            parse_mode=ParseMode.HTML,
-            reply_markup=appeal_actions(appeal["id"])
-        )
-
-
-# =========================================================
-# ALL APPEALS
-# =========================================================
-
-async def show_all_appeals(update, context):
-
-    query = update.callback_query
-    await query.answer()
-
-    if not is_admin(update.effective_user.id):
-        return
-
-    appeals = get_all_appeals()
-
-    if not appeals:
-
-        await query.message.edit_text(
-            "📭 <b>Murojaatlar mavjud emas.</b>",
-            parse_mode=ParseMode.HTML,
-            reply_markup=admin_menu()
-        )
-
-        return
-
-    status_map = {
-        "new": "🆕 Yangi",
-        "process": "🔄 Jarayonda",
-        "done": "✅ Yakunlandi",
-        "rejected": "❌ Rad etildi",
-    }
-
-    await query.message.edit_text(
-        f"📋 <b>BARCHA MUROJAATLAR</b>\n\n"
-        f"Jami: <b>{len(appeals)}</b> ta",
-        parse_mode=ParseMode.HTML,
-        reply_markup=admin_menu()
-    )
-
-    for appeal in appeals:
-
-        user = get_user(appeal["telegram_id"])
-
-        student = ""
-
-        if user:
-
-            student = (
-                f"👤 <b>{esc(user['full_name'])}</b>\n"
-                f"🎓 {esc(user['course'])} | "
-                f"👥 {esc(user['group_name'])}\n"
-                f"🏛 {esc(user['faculty'])}\n\n"
+            await query.message.reply_text(
+                "❌ Murojaat ID noto‘g‘ri."
             )
 
-        text = (
-            f"📌 <b>#{appeal['id']}</b>\n"
-            f"📊 <b>Status:</b> "
-            f"{status_map.get(appeal['status'], appeal['status'])}\n\n"
-            f"{student}"
-            f"📝 {esc(appeal['message'])}\n\n"
-            f"🕐 {appeal['created_at']}"
-        )
+            return
+
+        appeal = get_appeal(appeal_id)
+
+        if not appeal:
+
+            await query.message.reply_text(
+                "❌ Murojaat topilmadi."
+            )
+
+            return
+
+        context.user_data["admin_reply"] = True
+        context.user_data["reply_appeal_id"] = appeal_id
 
         await query.message.reply_text(
-            text,
-            parse_mode=ParseMode.HTML,
-            reply_markup=appeal_actions(appeal["id"])
+            f"💬 Murojaat #{appeal_id}\n\n"
+            "Iltimos, talabaga yubormoqchi bo‘lgan "
+            "javobingizni yozing.",
+            reply_markup=ReplyKeyboardMarkup(
+                [
+                    ["❌ Bekor qilish"]
+                ],
+                resize_keyboard=True,
+            ),
         )
-
-
-# =========================================================
-# STATISTICS
-# =========================================================
-
-async def show_stats(update, context):
-
-    query = update.callback_query
-    await query.answer()
-
-    if not is_admin(update.effective_user.id):
-        return
-
-    conn = get_db()
-
-    users = conn.execute(
-        "SELECT COUNT(*) FROM users"
-    ).fetchone()[0]
-
-    total = conn.execute(
-        "SELECT COUNT(*) FROM appeals"
-    ).fetchone()[0]
-
-    new = conn.execute(
-        "SELECT COUNT(*) FROM appeals WHERE status='new'"
-    ).fetchone()[0]
-
-    process = conn.execute(
-        "SELECT COUNT(*) FROM appeals WHERE status='process'"
-    ).fetchone()[0]
-
-    done = conn.execute(
-        "SELECT COUNT(*) FROM appeals WHERE status='done'"
-    ).fetchone()[0]
-
-    rejected = conn.execute(
-        "SELECT COUNT(*) FROM appeals WHERE status='rejected'"
-    ).fetchone()[0]
-
-    conn.close()
-
-    text = (
-        "📊 <b>BOT STATISTIKASI</b>\n\n"
-        "━━━━━━━━━━━━━━━━\n"
-        f"👥 <b>Talabalar:</b> {users}\n"
-        f"📨 <b>Jami murojaatlar:</b> {total}\n"
-        "━━━━━━━━━━━━━━━━\n\n"
-        f"🆕 <b>Yangi:</b> {new}\n"
-        f"🔄 <b>Jarayonda:</b> {process}\n"
-        f"✅ <b>Yakunlangan:</b> {done}\n"
-        f"❌ <b>Rad etilgan:</b> {rejected}"
-    )
-
-    await query.message.edit_text(
-        text,
-        parse_mode=ParseMode.HTML,
-        reply_markup=admin_menu()
-    )
 
 
 # =========================================================
 # ADMIN REPLY
 # =========================================================
 
-async def start_reply(update, context):
+async def admin_reply_handler(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+):
 
-    query = update.callback_query
-    await query.answer()
-
-    if not is_admin(update.effective_user.id):
+    if not is_admin(
+        update.effective_user.id
+    ):
         return
 
-    try:
-        appeal_id = int(query.data.split("_")[1])
-    except (ValueError, IndexError):
-
-        await query.message.reply_text(
-            "⚠️ Murojaat raqami noto‘g‘ri."
-        )
-
+    if not context.user_data.get("admin_reply"):
         return
-
-    appeal = get_appeal(appeal_id)
-
-    if not appeal:
-
-        await query.message.reply_text(
-            "❌ Murojaat topilmadi."
-        )
-
-        return
-
-    context.user_data["state"] = "admin_reply"
-    context.user_data["reply_appeal_id"] = appeal_id
-
-    await query.message.reply_text(
-        f"💬 <b>#{appeal_id}</b> Murojaatga javob\n\n"
-        "Javobingizni bitta xabarda yozing.\n\n"
-        "✍️ <i>Masalan: Murojaatingiz ko‘rib chiqildi...</i>",
-        parse_mode=ParseMode.HTML
-    )
-
-
-async def process_admin_reply(update, context):
-
-    appeal_id = context.user_data.get("reply_appeal_id")
 
     text = update.message.text.strip()
 
+    if text == "❌ Bekor qilish":
+
+        context.user_data.clear()
+
+        await update.message.reply_text(
+            "❌ Javob berish bekor qilindi."
+        )
+
+        return
+
+    appeal_id = context.user_data.get(
+        "reply_appeal_id"
+    )
+
     if not appeal_id:
-        return
 
-    if not text:
+        context.user_data.clear()
+
         await update.message.reply_text(
-            "⚠️ Javob matni bo‘sh bo‘lishi mumkin emas."
+            "❌ Murojaat topilmadi."
         )
+
         return
 
     appeal = get_appeal(appeal_id)
 
     if not appeal:
 
-        await update.message.reply_text(
-            "❌ Murojaat topilmadi."
-        )
-
         context.user_data.clear()
 
-        return
-
-    save_reply(
-        appeal_id,
-        update.effective_user.id,
-        text
-    )
-
-    try:
-
-        await context.bot.send_message(
-            chat_id=appeal["telegram_id"],
-            text=(
-                "💬 <b>REKTORATDAN JAVOB</b>\n\n"
-                "━━━━━━━━━━━━━━━━\n"
-                f"🆔 <b>Murojaat:</b> #{appeal_id}\n"
-                "━━━━━━━━━━━━━━━━\n\n"
-                f"{esc(text)}\n\n"
-                "Hurmat bilan,\n"
-                "<b>Universitet rektorati</b>"
-            ),
-            parse_mode=ParseMode.HTML
-        )
-
-    except Exception as e:
-
-        logger.error(
-            f"Talabaga javob yuborishda xato: {e}"
-        )
-
         await update.message.reply_text(
-            "⚠️ Javob saqlandi, ammo talabaga "
-            "yuborishda texnik xatolik yuz berdi."
-        )
-
-        context.user_data.clear()
-
-        return
-
-    context.user_data.clear()
-
-    await update.message.reply_text(
-        f"✅ <b>#{appeal_id}</b> murojaatga javob yuborildi.",
-        parse_mode=ParseMode.HTML,
-        reply_markup=admin_menu()
-    )
-
-
-# =========================================================
-# STATUS
-# =========================================================
-
-async def change_status(update, context):
-
-    query = update.callback_query
-    await query.answer()
-
-    if not is_admin(update.effective_user.id):
-        return
-
-    parts = query.data.split("_")
-
-    if len(parts) != 3:
-        return
-
-    status = parts[1]
-
-    try:
-        appeal_id = int(parts[2])
-    except ValueError:
-        return
-
-    appeal = get_appeal(appeal_id)
-
-    if not appeal:
-
-        await query.message.reply_text(
             "❌ Murojaat topilmadi."
         )
 
         return
 
-    update_status(
-        appeal_id,
-        status
-    )
-
-    status_text = {
-
-        "process":
-            "🔄 <b>Murojaatingiz ko‘rib chiqilmoqda.</b>\n\n"
-            "Mas’ul xodimlar murojaatingiz bilan ishlamoqda.",
-
-        "done":
-            "✅ <b>Murojaatingiz yakunlandi.</b>\n\n"
-            "Murojaatingiz bo‘yicha ko‘rib chiqish jarayoni yakunlandi.",
-
-        "rejected":
-            "❌ <b>Murojaatingiz rad etildi.</b>\n\n"
-            "Qo‘shimcha ma’lumot olish uchun "
-            "universitet mas’ullariga murojaat qilishingiz mumkin.",
-    }
+    student_id = appeal["telegram_id"]
 
     try:
 
         await context.bot.send_message(
-            chat_id=appeal["telegram_id"],
+            chat_id=student_id,
             text=(
-                "📢 <b>MUROJAAT HOLATI YANGILANDI</b>\n\n"
-                f"🆔 <b>#{appeal_id}</b>\n\n"
-                f"{status_text.get(status, 'Holat yangilandi.')}"
+                "💬 MUROJAATINGIZ BO‘YICHA JAVOB\n\n"
+                f"{text}"
             ),
-            parse_mode=ParseMode.HTML
+            reply_markup=main_menu_keyboard(),
+        )
+
+        conn = get_db()
+        cursor = conn.cursor()
+
+        cursor.execute(
+            """
+            UPDATE appeals
+            SET admin_reply = ?,
+                status = ?,
+                updated_at = ?
+            WHERE id = ?
+            """,
+            (
+                text,
+                "Javob berildi",
+                now(),
+                appeal_id,
+            ),
+        )
+
+        conn.commit()
+        conn.close()
+
+        context.user_data.clear()
+
+        await update.message.reply_text(
+            f"✅ Javob murojaat #{appeal_id} "
+            "egasiga muvaffaqiyatli yuborildi."
         )
 
     except Exception as e:
 
         logger.error(
-            f"Status yuborishda xato: {e}"
+            f"Talabaga javob yuborishda xatolik: {e}"
         )
-
-    status_names = {
-        "process": "🔄 Jarayonda",
-        "done": "✅ Yakunlandi",
-        "rejected": "❌ Rad etildi",
-    }
-
-    await query.message.reply_text(
-        f"✅ <b>#{appeal_id}</b>\n\n"
-        f"Yangi holat: "
-        f"<b>{status_names.get(status, status)}</b>",
-        parse_mode=ParseMode.HTML
-    )
-
-
-# =========================================================
-# BACK MAIN
-# =========================================================
-
-async def back_main(update, context):
-
-    query = update.callback_query
-    await query.answer()
-
-    context.user_data.clear()
-
-    user = get_user(update.effective_user.id)
-
-    if user:
-
-        await query.message.edit_text(
-            "🎓 <b>ASOSIY MENYU</b>\n\n"
-            "Kerakli bo‘limni tanlang:",
-            parse_mode=ParseMode.HTML,
-            reply_markup=main_menu()
-        )
-
-    else:
-
-        await query.message.edit_text(
-            "🎓 <b>UNIVERSITET REKTORIGA MUROJAAT BOTI</b>\n\n"
-            "Botdan foydalanish uchun ro‘yxatdan o‘ting.",
-            parse_mode=ParseMode.HTML,
-            reply_markup=start_keyboard()
-        )
-
-
-# =========================================================
-# CANCEL
-# =========================================================
-
-async def cancel(update, context):
-
-    context.user_data.clear()
-
-    user = get_user(update.effective_user.id)
-
-    if user:
 
         await update.message.reply_text(
-            "↩️ <b>Amal bekor qilindi.</b>\n\n"
-            "Asosiy menyudan kerakli bo‘limni tanlang.",
-            parse_mode=ParseMode.HTML,
-            reply_markup=main_menu()
+            "❌ Javob yuborilmadi.\n\n"
+            "Foydalanuvchi botni /start orqali ishga "
+            "tushirganini tekshiring."
         )
-
-    else:
-
-        await update.message.reply_text(
-            "↩️ <b>Amal bekor qilindi.</b>",
-            parse_mode=ParseMode.HTML,
-            reply_markup=start_keyboard()
-        )
-
-
-# =========================================================
-# ID
-# =========================================================
-
-async def my_id(update, context):
-
-    await update.message.reply_text(
-        "🆔 <b>Sizning Telegram ID:</b>\n\n"
-        f"<code>{update.effective_user.id}</code>",
-        parse_mode=ParseMode.HTML
-    )
-
-
-# =========================================================
-# CALLBACK ROUTER
-# =========================================================
-
-async def callback_router(update, context):
-
-    query = update.callback_query
-
-    data = query.data
-
-    if data == "register_start":
-        await registration_start(update, context)
-
-    elif data == "register_confirm":
-        await registration_confirm(update, context)
-
-    elif data == "register_rewrite":
-        await registration_rewrite(update, context)
-
-    elif data == "appeal_start":
-        await appeal_start(update, context)
-
-    elif data == "appeal_confirm":
-        await appeal_send(update, context)
-
-    elif data == "appeal_rewrite":
-        await appeal_rewrite(update, context)
-
-    elif data == "my_profile":
-        await my_profile(update, context)
-
-    elif data == "about_bot":
-        await about_bot(update, context)
-
-    elif data == "back_main":
-        await back_main(update, context)
-
-    elif data == "admin_new":
-        await show_new_appeals(update, context)
-
-    elif data == "admin_all":
-        await show_all_appeals(update, context)
-
-    elif data == "admin_stats":
-        await show_stats(update, context)
-
-    elif data.startswith("reply_"):
-        await start_reply(update, context)
-
-    elif data.startswith("status_"):
-        await change_status(update, context)
 
 
 # =========================================================
 # TEXT ROUTER
 # =========================================================
 
-async def text_router(update, context):
+async def text_router(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+):
 
-    state = context.user_data.get("state")
+    text = update.message.text.strip()
+    user_id = update.effective_user.id
 
-    if state == "registration":
+    # =====================================================
+    # ADMIN JAVOBI
+    # =====================================================
 
-        await process_registration(
+    if (
+        is_admin(user_id)
+        and context.user_data.get("admin_reply")
+    ):
+
+        await admin_reply_handler(
             update,
-            context
+            context,
         )
 
-    elif state == "appeal":
+        return
 
-        await process_appeal(
+    # =====================================================
+    # ADMIN
+    # =====================================================
+
+    if is_admin(user_id):
+        return
+
+    # =====================================================
+    # REGISTRATION
+    # =====================================================
+
+    if context.user_data.get("registration"):
+
+        await registration_text_handler(
             update,
-            context
+            context,
         )
 
-    elif state == "admin_reply":
+        return
 
-        if not is_admin(update.effective_user.id):
+    # =====================================================
+    # APPEAL
+    # =====================================================
+
+    if context.user_data.get("appeal"):
+
+        step = context.user_data.get(
+            "appeal_step"
+        )
+
+        if step == "text":
+
+            await appeal_text_handler(
+                update,
+                context,
+            )
+
             return
 
-        await process_admin_reply(
+        if step == "media":
+
+            await media_question_handler(
+                update,
+                context,
+            )
+
+            return
+
+        if step == "waiting_media":
+
+            await update.message.reply_text(
+                "📎 Iltimos, foto, video yoki hujjatni yuboring."
+            )
+
+            return
+
+    # =====================================================
+    # MENU
+    # =====================================================
+
+    if text == "📝 Ro‘yxatdan o‘tish":
+
+        await start_registration(
             update,
-            context
+            context,
+        )
+
+        return
+
+    if text == "📝 Murojaat yuborish":
+
+        await start_appeal(
+            update,
+            context,
+        )
+
+        return
+
+    # =====================================================
+    # DEFAULT
+    # =====================================================
+
+    user = get_user(user_id)
+
+    if user:
+
+        await update.message.reply_text(
+            "Kerakli bo‘limni tanlang:",
+            reply_markup=main_menu_keyboard(),
         )
 
     else:
 
-        user = get_user(
-            update.effective_user.id
+        await update.message.reply_text(
+            "Iltimos, avval ro‘yxatdan o‘ting.",
+            reply_markup=start_registration_keyboard(),
         )
-
-        if user:
-
-            await update.message.reply_text(
-                "🎓 <b>Asosiy menyu</b>\n\n"
-                "Kerakli bo‘limni tanlang:",
-                parse_mode=ParseMode.HTML,
-                reply_markup=main_menu()
-            )
-
-        else:
-
-            await update.message.reply_text(
-                "⚠️ Avval ro‘yxatdan o‘ting.",
-                reply_markup=start_keyboard()
-            )
 
 
 # =========================================================
 # ERROR HANDLER
 # =========================================================
 
-async def error_handler(update, context):
+async def error_handler(
+    update: object,
+    context: ContextTypes.DEFAULT_TYPE,
+):
 
     logger.error(
         "Botda xatolik:",
-        exc_info=context.error
+        exc_info=context.error,
     )
 
 
@@ -1597,15 +1380,6 @@ async def error_handler(update, context):
 
 def main():
 
-    if not BOT_TOKEN:
-
-        print("❌ BOT_TOKEN topilmadi!")
-        return
-
-    if not ADMIN_IDS:
-
-        print("⚠️ ADMIN_IDS topilmadi!")
-
     init_db()
 
     application = (
@@ -1614,63 +1388,87 @@ def main():
         .build()
     )
 
-    # Commands
+    # /start
     application.add_handler(
         CommandHandler(
             "start",
-            start
+            start,
         )
     )
 
-    application.add_handler(
-        CommandHandler(
-            "admin",
-            admin_command
-        )
-    )
-
-    application.add_handler(
-        CommandHandler(
-            "cancel",
-            cancel
-        )
-    )
-
-    application.add_handler(
-        CommandHandler(
-            "id",
-            my_id
-        )
-    )
-
-    # Callback buttons
+    # ADMIN INLINE BUTTON
     application.add_handler(
         CallbackQueryHandler(
-            callback_router
+            callback_handler
         )
     )
 
-    # Text
+    # CONTACT
+    application.add_handler(
+        MessageHandler(
+            filters.CONTACT,
+            contact_handler,
+        )
+    )
+
+    # PHOTO
+    application.add_handler(
+        MessageHandler(
+            filters.PHOTO,
+            photo_handler,
+        )
+    )
+
+    # VIDEO
+    application.add_handler(
+        MessageHandler(
+            filters.VIDEO,
+            video_handler,
+        )
+    )
+
+    # DOCUMENT
+    application.add_handler(
+        MessageHandler(
+            filters.Document.ALL,
+            document_handler,
+        )
+    )
+
+    # TEXT
     application.add_handler(
         MessageHandler(
             filters.TEXT & ~filters.COMMAND,
-            text_router
+            text_router,
         )
     )
 
-    # Error
+    # ERROR
     application.add_error_handler(
         error_handler
     )
 
-    print(
-        "🤖 Universitet Rektor Murojaat Boti ishga tushdi..."
+    logger.info(
+        "========================================"
+    )
+    logger.info(
+        "NAVOIY DAVLAT UNIVERSITETI"
+    )
+    logger.info(
+        "REKTORGA MUROJAAT BOTI ISHLAMOQDA"
+    )
+    logger.info(
+        "========================================"
     )
 
     application.run_polling(
-        drop_pending_updates=True
+        allowed_updates=Update.ALL_TYPES
     )
 
+
+# =========================================================
+# START BOT
+# =========================================================
 
 if __name__ == "__main__":
     main()
